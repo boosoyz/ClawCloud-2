@@ -834,30 +834,43 @@ class AutoLogin:
             time.sleep(3)
             page.wait_for_load_state('networkidle', timeout=30000)
     
-    def wait_redirect(self, page, wait=60):
-        """等待重定向并检测区域"""
-        self.log("等待重定向...", "STEP")
-        for i in range(wait):
-            url = page.url
-            
-            # 检查是否已跳转到 claw.cloud
-            if 'claw.cloud' in url and 'signin' not in url.lower():
-                self.log("重定向成功！", "SUCCESS")
-                
-                # 检测并记录区域
-                self.detect_region(url)
-                
-                return True
-            
-            if 'github.com/login/oauth/authorize' in url:
-                self.oauth(page)
-            
-            time.sleep(1)
-            if i % 10 == 0:
-                self.log(f"  等待... ({i}秒)")
+def wait_redirect(self, page, wait=60):
+    """等待重定向并检测区域"""
+    self.log("等待重定向...", "STEP")
+    
+    for i in range(wait):
+        url = page.url
         
-        self.log("重定向超时", "ERROR")
-        return False
+        # 检查是否已跳转到 claw.cloud 的真正页面
+        if 'claw.cloud' in url:
+            # 排除中间页面
+            excluded_paths = ['/callback', '/signin', '/login', '/auth']
+            if any(path in url.lower() for path in excluded_paths):
+                if i % 5 == 0:
+                    self.log(f"  处理中... ({url[:50]}...)")
+                time.sleep(1)
+                continue
+            
+            # 检查是否到达控制台/仪表板
+            if '/console' in url or '/dashboard' in url or url.rstrip('/').endswith('claw.cloud'):
+                self.log("重定向成功！", "SUCCESS")
+                self.detect_region(url)
+                return True
+        
+        # 处理 GitHub OAuth
+        if 'github.com/login/oauth/authorize' in url:
+            self.oauth(page)
+        
+        # 处理 Google OAuth (如果需要)
+        if 'accounts.google.com' in url:
+            self.google_oauth(page)  # 可能需要添加
+        
+        time.sleep(1)
+        if i % 10 == 0:
+            self.log(f"  等待... ({i}秒)")
+    
+    self.log("重定向超时", "ERROR")
+    return False
     
     def keepalive(self, page):
         """保活 - 使用检测到的区域 URL"""
