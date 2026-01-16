@@ -18,7 +18,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 from playwright.sync_api import sync_playwright
 
 # ==================== 配置 ====================
-LOGIN_ENTRY_URL = "https://eu-central-1.run.claw.cloud"
+LOGIN_ENTRY_URL = "https://console.run.claw.cloud"
 SIGNIN_URL = f"{LOGIN_ENTRY_URL}/signin"
 DEVICE_VERIFY_WAIT = 30
 TWO_FACTOR_WAIT = int(os.environ.get("TWO_FACTOR_WAIT", "120"))
