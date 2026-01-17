@@ -1,8 +1,8 @@
 """
 ClawCloud 自动登录脚本
-- 自动检测区域跳转（如 ap-northeast-1.run.claw.cloud）
-- 等待设备验证批准（30秒）
-- 每次登录后自动更新 Cookie
+- 自动检测区域跳转
+- 正确处理 OAuth callback
+- 等待设备验证批准
 - Telegram 通知
 """
 
@@ -16,22 +16,18 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
 # ==================== 配置 ====================
-# 固定登录入口
 LOGIN_ENTRY_URL = "https://console.run.claw.cloud"
 SIGNIN_URL = f"{LOGIN_ENTRY_URL}/signin"
 DEVICE_VERIFY_WAIT = 30
 TWO_FACTOR_WAIT = int(os.environ.get("TWO_FACTOR_WAIT", "120"))
 
-# 区域域名模式（关键修复！）
 REGION_PATTERNS = [
-    r'([a-z]+-[a-z]+-\d+)\.run\.claw\.cloud',      # ap-northeast-1.run.claw.cloud
-    r'([a-z]+-[a-z]+-\d+)\.console\.claw\.cloud',  # 备用格式
+    r'([a-z]+-[a-z]+-\d+)\.run\.claw\.cloud',
+    r'([a-z]+-[a-z]+-\d+)\.console\.claw\.cloud',
 ]
 
 
 class Telegram:
-    """Telegram 通知"""
-    
     def __init__(self):
         self.token = os.environ.get('TG_BOT_TOKEN')
         self.chat_id = os.environ.get('TG_CHAT_ID')
@@ -110,18 +106,13 @@ class Telegram:
                     m = pattern.match(text)
                     if m:
                         return m.group(1)
-            
-            except Exception:
+            except:
                 pass
-            
             time.sleep(2)
-        
         return None
 
 
 class SecretUpdater:
-    """GitHub Secret 更新器"""
-    
     def __init__(self):
         self.token = os.environ.get('REPO_TOKEN')
         self.repo = os.environ.get('GITHUB_REPOSITORY')
@@ -129,7 +120,7 @@ class SecretUpdater:
         if self.ok:
             print("✅ Secret 自动更新已启用")
         else:
-            print("⚠️ Secret 自动更新未启用（需要 REPO_TOKEN）")
+            print("⚠️ Secret 自动更新未启用")
     
     def update(self, name, value):
         if not self.ok:
@@ -166,8 +157,6 @@ class SecretUpdater:
 
 
 class AutoLogin:
-    """自动登录"""
-    
     def __init__(self):
         self.username = os.environ.get('GH_USERNAME')
         self.password = os.environ.get('GH_PASSWORD')
@@ -177,7 +166,6 @@ class AutoLogin:
         self.shots = []
         self.logs = []
         self.n = 0
-        
         self.detected_region = None
         self.region_base_url = None
         
@@ -209,43 +197,46 @@ class AutoLogin:
                 pass
         return False
     
+    def is_logged_in(self, url):
+        """
+        判断是否真正登录成功
+        排除: signin, callback, login, github.com
+        """
+        if 'github.com' in url:
+            return False
+        if 'claw.cloud' not in url:
+            return False
+        
+        # 这些路径表示未登录或登录中
+        not_logged_patterns = ['/signin', '/callback', '/login', '/auth']
+        path = urlparse(url).path.lower()
+        
+        for pattern in not_logged_patterns:
+            if pattern in path:
+                return False
+        
+        # 如果在 claw.cloud 且不在上述路径，认为登录成功
+        return True
+    
     def detect_region(self, url):
-        """
-        从 URL 中检测区域信息
-        支持格式:
-        - https://ap-northeast-1.run.claw.cloud/...
-        - https://eu-central-1.run.claw.cloud/...
-        """
         try:
             parsed = urlparse(url)
             host = parsed.netloc
             
-            self.log(f"检测区域，当前域名: {host}", "INFO")
-            
-            # 尝试匹配区域模式
             for pattern in REGION_PATTERNS:
                 match = re.search(pattern, host)
                 if match:
                     region = match.group(1)
                     self.detected_region = region
-                    # 构建区域基础 URL（使用实际的域名格式）
                     if '.run.claw.cloud' in host:
                         self.region_base_url = f"https://{region}.run.claw.cloud"
                     else:
                         self.region_base_url = f"https://{region}.console.claw.cloud"
-                    
                     self.log(f"检测到区域: {region}", "SUCCESS")
-                    self.log(f"区域 URL: {self.region_base_url}", "INFO")
                     return region
             
-            # 如果是主域名（未重定向），记录但不设置区域
-            if 'console.run.claw.cloud' in host or 'claw.cloud' in host:
-                self.log(f"在主域名，等待区域重定向...", "INFO")
+            if 'claw.cloud' in host:
                 self.region_base_url = f"https://{host}"
-                return None
-            
-            self.log(f"未识别的域名格式: {host}", "WARN")
-            self.region_base_url = f"{parsed.scheme}://{parsed.netloc}"
             return None
             
         except Exception as e:
@@ -253,13 +244,11 @@ class AutoLogin:
             return None
     
     def get_base_url(self):
-        """获取当前应该使用的基础 URL"""
         if self.region_base_url:
             return self.region_base_url
         return LOGIN_ENTRY_URL
     
     def get_session(self, context):
-        """提取 Session Cookie"""
         try:
             for c in context.cookies():
                 if c['name'] == 'user_session' and 'github' in c.get('domain', ''):
@@ -269,7 +258,6 @@ class AutoLogin:
         return None
     
     def save_cookie(self, value):
-        """保存新 Cookie"""
         if not value:
             return
         
@@ -277,32 +265,21 @@ class AutoLogin:
         
         if self.secret.update('GH_SESSION', value):
             self.log("已自动更新 GH_SESSION", "SUCCESS")
-            self.tg.send("🔑 <b>Cookie 已自动更新</b>\n\nGH_SESSION 已保存")
+            self.tg.send("🔑 <b>Cookie 已自动更新</b>")
         else:
-            self.tg.send(f"""🔑 <b>新 Cookie</b>
-
-请更新 Secret <b>GH_SESSION</b>:
-<code>{value}</code>""")
-            self.log("已通过 Telegram 发送 Cookie", "SUCCESS")
+            self.tg.send(f"🔑 <b>新 Cookie</b>\n<code>{value}</code>")
     
     def wait_device(self, page):
-        """等待设备验证"""
         self.log(f"需要设备验证，等待 {DEVICE_VERIFY_WAIT} 秒...", "WARN")
         self.shot(page, "设备验证")
         
-        self.tg.send(f"""⚠️ <b>需要设备验证</b>
-
-请在 {DEVICE_VERIFY_WAIT} 秒内批准：
-1️⃣ 检查邮箱点击链接
-2️⃣ 或在 GitHub App 批准""")
-        
+        self.tg.send(f"⚠️ <b>需要设备验证</b>\n请在 {DEVICE_VERIFY_WAIT} 秒内批准")
         if self.shots:
             self.tg.photo(self.shots[-1], "设备验证页面")
         
         for i in range(DEVICE_VERIFY_WAIT):
             time.sleep(1)
             if i % 5 == 0:
-                self.log(f"  等待... ({i}/{DEVICE_VERIFY_WAIT}秒)")
                 url = page.url
                 if 'verified-device' not in url and 'device-verification' not in url:
                     self.log("设备验证通过！", "SUCCESS")
@@ -318,40 +295,30 @@ class AutoLogin:
             return True
         
         self.log("设备验证超时", "ERROR")
-        self.tg.send("❌ <b>设备验证超时</b>")
         return False
     
     def wait_two_factor_mobile(self, page):
-        """等待 GitHub Mobile 两步验证批准"""
         self.log(f"需要两步验证（GitHub Mobile），等待 {TWO_FACTOR_WAIT} 秒...", "WARN")
         
         shot = self.shot(page, "两步验证_mobile")
-        self.tg.send(f"""⚠️ <b>需要两步验证（GitHub Mobile）</b>
-
-请打开手机 GitHub App 批准本次登录。
-等待时间：{TWO_FACTOR_WAIT} 秒""")
+        self.tg.send(f"⚠️ <b>需要 GitHub Mobile 验证</b>\n等待: {TWO_FACTOR_WAIT} 秒")
         if shot:
-            self.tg.photo(shot, "两步验证页面（数字在图里）")
+            self.tg.photo(shot, "两步验证页面")
         
         for i in range(TWO_FACTOR_WAIT):
             time.sleep(1)
-            
             url = page.url
             
             if "github.com/sessions/two-factor/" not in url:
                 self.log("两步验证通过！", "SUCCESS")
-                self.tg.send("✅ <b>两步验证通过</b>")
                 return True
             
-            if "github.com/login" in url:
-                self.log("两步验证后回到了登录页，需重新登录", "ERROR")
+            if "github.com/login" in url and "two-factor" not in url:
+                self.log("被踢回登录页", "ERROR")
                 return False
             
             if i % 10 == 0 and i != 0:
                 self.log(f"  等待... ({i}/{TWO_FACTOR_WAIT}秒)")
-                shot = self.shot(page, f"两步验证_{i}s")
-                if shot:
-                    self.tg.photo(shot, f"两步验证页面（第{i}秒）")
             
             if i % 30 == 0 and i != 0:
                 try:
@@ -361,55 +328,39 @@ class AutoLogin:
                     pass
         
         self.log("两步验证超时", "ERROR")
-        self.tg.send("❌ <b>两步验证超时</b>")
         return False
     
     def handle_2fa_code_input(self, page):
-        """处理 TOTP 验证码输入"""
         self.log("需要输入验证码", "WARN")
         shot = self.shot(page, "两步验证_code")
         
+        # 尝试切换到 TOTP 输入
         try:
-            more_options = [
-                'a:has-text("Use an authentication app")',
-                'a:has-text("Enter a code")',
-                'button:has-text("Use an authentication app")',
-                '[href*="two-factor/app"]'
-            ]
-            for sel in more_options:
+            for sel in ['a:has-text("Use an authentication app")', 'a:has-text("Enter a code")']:
                 try:
                     el = page.locator(sel).first
                     if el.is_visible(timeout=2000):
                         el.click()
                         time.sleep(2)
                         page.wait_for_load_state('networkidle', timeout=15000)
-                        self.log("已切换到验证码输入页面", "SUCCESS")
-                        shot = self.shot(page, "两步验证_code_切换后")
+                        shot = self.shot(page, "两步验证_切换后")
                         break
                 except:
                     pass
         except:
             pass
         
-        self.tg.send(f"""🔐 <b>需要验证码登录</b>
-
-请在 Telegram 里发送：
-<code>/code 你的6位验证码</code>
-
-等待时间：{TWO_FACTOR_WAIT} 秒""")
+        self.tg.send(f"🔐 <b>请发送验证码</b>\n<code>/code 123456</code>\n等待: {TWO_FACTOR_WAIT}秒")
         if shot:
             self.tg.photo(shot, "两步验证页面")
         
-        self.log(f"等待验证码（{TWO_FACTOR_WAIT}秒）...", "WARN")
         code = self.tg.wait_code(timeout=TWO_FACTOR_WAIT)
         
         if not code:
             self.log("等待验证码超时", "ERROR")
-            self.tg.send("❌ <b>等待验证码超时</b>")
             return False
         
         self.log("收到验证码，正在填入...", "SUCCESS")
-        self.tg.send("✅ 收到验证码，正在填入...")
         
         selectors = [
             'input[autocomplete="one-time-code"]',
@@ -425,51 +376,36 @@ class AutoLogin:
                 el = page.locator(sel).first
                 if el.is_visible(timeout=2000):
                     el.fill(code)
-                    self.log(f"已填入验证码", "SUCCESS")
                     time.sleep(1)
                     
-                    submitted = False
-                    verify_btns = [
-                        'button:has-text("Verify")',
-                        'button[type="submit"]',
-                        'input[type="submit"]'
-                    ]
-                    for btn_sel in verify_btns:
+                    # 提交
+                    for btn_sel in ['button:has-text("Verify")', 'button[type="submit"]']:
                         try:
                             btn = page.locator(btn_sel).first
                             if btn.is_visible(timeout=1000):
                                 btn.click()
-                                submitted = True
-                                self.log("已点击 Verify 按钮", "SUCCESS")
                                 break
                         except:
                             pass
-                    
-                    if not submitted:
+                    else:
                         page.keyboard.press("Enter")
-                        self.log("已按 Enter 提交", "SUCCESS")
                     
                     time.sleep(3)
                     page.wait_for_load_state('networkidle', timeout=30000)
-                    self.shot(page, "验证码提交后")
                     
                     if "github.com/sessions/two-factor/" not in page.url:
                         self.log("验证码验证通过！", "SUCCESS")
-                        self.tg.send("✅ <b>验证码验证通过</b>")
                         return True
                     else:
                         self.log("验证码可能错误", "ERROR")
-                        self.tg.send("❌ <b>验证码可能错误，请检查后重试</b>")
                         return False
             except:
                 pass
         
         self.log("没找到验证码输入框", "ERROR")
-        self.tg.send("❌ <b>没找到验证码输入框</b>")
         return False
     
     def login_github(self, page, context):
-        """登录 GitHub"""
         self.log("登录 GitHub...", "STEP")
         self.shot(page, "github_登录页")
         
@@ -495,13 +431,14 @@ class AutoLogin:
         url = page.url
         self.log(f"当前: {url}")
         
+        # 设备验证
         if 'verified-device' in url or 'device-verification' in url:
             if not self.wait_device(page):
                 return False
             time.sleep(2)
             page.wait_for_load_state('networkidle', timeout=30000)
-            self.shot(page, "验证后")
         
+        # 2FA
         if 'two-factor' in page.url:
             self.log("需要两步验证！", "WARN")
             self.shot(page, "两步验证")
@@ -509,20 +446,17 @@ class AutoLogin:
             if 'two-factor/mobile' in page.url:
                 if not self.wait_two_factor_mobile(page):
                     return False
-                try:
-                    page.wait_for_load_state('networkidle', timeout=30000)
-                    time.sleep(2)
-                except:
-                    pass
             else:
                 if not self.handle_2fa_code_input(page):
                     return False
-                try:
-                    page.wait_for_load_state('networkidle', timeout=30000)
-                    time.sleep(2)
-                except:
-                    pass
+            
+            try:
+                page.wait_for_load_state('networkidle', timeout=30000)
+                time.sleep(2)
+            except:
+                pass
         
+        # 检查错误
         try:
             err = page.locator('.flash-error').first
             if err.is_visible(timeout=2000):
@@ -534,62 +468,153 @@ class AutoLogin:
         return True
     
     def oauth(self, page):
-        """处理 OAuth"""
         if 'github.com/login/oauth/authorize' in page.url:
-            self.log("处理 OAuth...", "STEP")
+            self.log("处理 OAuth 授权...", "STEP")
             self.shot(page, "oauth")
             self.click(page, ['button[name="authorize"]', 'button:has-text("Authorize")'], "授权")
             time.sleep(3)
             page.wait_for_load_state('networkidle', timeout=30000)
     
-    def wait_redirect(self, page, wait=60):
-        """等待重定向并检测区域"""
-        self.log("等待重定向...", "STEP")
+    def wait_for_login_complete(self, page, timeout=60):
+        """
+        等待真正登录成功
+        需要等待 callback 处理完成，跳转到控制台
+        """
+        self.log("等待登录完成...", "STEP")
         
-        for i in range(wait):
-            url = page.url
-            self.log(f"  检查 URL: {url[:80]}...", "INFO") if i % 10 == 0 else None
+        for i in range(timeout):
+            try:
+                # 等待网络空闲
+                page.wait_for_load_state('networkidle', timeout=5000)
+            except:
+                pass
             
-            # 检查是否已跳转到 claw.cloud（排除 signin 页面）
-            if 'claw.cloud' in url and 'signin' not in url.lower() and 'github.com' not in url:
-                self.log(f"重定向成功！URL: {url}", "SUCCESS")
-                
-                # 检测并记录区域
+            url = page.url
+            
+            # 每10秒打印状态
+            if i % 10 == 0:
+                self.log(f"  当前 URL: {url[:80]}...")
+            
+            # 检查是否真正登录成功
+            if self.is_logged_in(url):
+                self.log(f"登录成功！URL: {url}", "SUCCESS")
                 self.detect_region(url)
-                
                 return True
             
+            # 如果在 callback 页面，等待它处理
+            if '/callback' in url:
+                self.log("  处理 OAuth callback...", "INFO") if i % 5 == 0 else None
+                time.sleep(1)
+                continue
+            
+            # 如果在 OAuth 授权页面
             if 'github.com/login/oauth/authorize' in url:
                 self.oauth(page)
+                continue
+            
+            # 如果被踢回 signin 页面（登录失败）
+            if '/signin' in url and 'callback' not in url:
+                # 检查是否刚进入，等几秒看看会不会继续跳转
+                if i < 10:
+                    time.sleep(1)
+                    continue
+                self.log("被重定向到登录页，登录可能失败", "WARN")
+                self.shot(page, "回到登录页")
+                # 继续等待，可能只是临时状态
+            
+            # 如果还在 GitHub 登录流程
+            if 'github.com' in url:
+                if 'login' in url and 'oauth' not in url:
+                    self.log("需要 GitHub 登录", "WARN")
+                    return False
             
             time.sleep(1)
-            if i % 10 == 0:
-                self.log(f"  等待... ({i}秒)")
         
-        self.log(f"重定向超时，最终 URL: {page.url}", "ERROR")
+        self.log(f"等待超时，最终 URL: {page.url}", "ERROR")
         return False
     
-    def keepalive(self, page):
-        """保活 - 使用检测到的区域 URL"""
-        self.log("保活...", "STEP")
+    def verify_login(self, page):
+        """
+        验证是否真正登录成功
+        尝试访问需要登录的页面，检查是否被重定向到 signin
+        """
+        self.log("验证登录状态...", "STEP")
         
         base_url = self.get_base_url()
-        self.log(f"使用基础 URL: {base_url}", "INFO")
+        test_url = f"{base_url}/apps"  # 需要登录才能访问的页面
+        
+        try:
+            page.goto(test_url, timeout=30000, wait_until='domcontentloaded')
+            time.sleep(3)
+            
+            try:
+                page.wait_for_load_state('networkidle', timeout=15000)
+            except:
+                pass
+            
+            current_url = page.url
+            self.log(f"验证 URL: {current_url}")
+            
+            # 如果被重定向到 signin，说明没登录成功
+            if '/signin' in current_url:
+                self.log("登录验证失败：被重定向到登录页", "ERROR")
+                self.shot(page, "验证失败_signin")
+                return False
+            
+            # 如果还在 callback 或 github
+            if '/callback' in current_url or 'github.com' in current_url:
+                self.log("登录验证失败：仍在认证流程中", "ERROR")
+                self.shot(page, "验证失败_callback")
+                return False
+            
+            # 检查页面内容，确认是控制台
+            try:
+                # 查找一些控制台特有的元素
+                indicators = [
+                    'text=Apps',
+                    'text=Application',
+                    'text=Create',
+                    '[class*="app"]',
+                    '[class*="dashboard"]'
+                ]
+                for ind in indicators:
+                    try:
+                        if page.locator(ind).first.is_visible(timeout=2000):
+                            self.log("找到控制台元素，登录确认成功！", "SUCCESS")
+                            return True
+                    except:
+                        pass
+            except:
+                pass
+            
+            # 如果 URL 正常且没被重定向，认为成功
+            if self.is_logged_in(current_url):
+                self.log("URL 检查通过，登录成功！", "SUCCESS")
+                return True
+            
+            self.log(f"无法确认登录状态: {current_url}", "WARN")
+            return False
+            
+        except Exception as e:
+            self.log(f"验证登录异常: {e}", "ERROR")
+            return False
+    
+    def keepalive(self, page):
+        """保活操作"""
+        self.log("执行保活...", "STEP")
+        
+        base_url = self.get_base_url()
+        self.log(f"使用 URL: {base_url}")
         
         pages_to_visit = [
-            (f"{base_url}/", "控制台"),
-            (f"{base_url}/apps", "应用"),
+            (f"{base_url}/apps", "应用列表"),
+            (f"{base_url}/", "控制台首页"),
         ]
-        
-        if self.detected_region:
-            self.log(f"当前区域: {self.detected_region}", "INFO")
         
         for url, name in pages_to_visit:
             try:
-                self.log(f"访问: {url}", "INFO")
+                self.log(f"访问: {name}")
                 page.goto(url, timeout=30000, wait_until='domcontentloaded')
-                
-                # 等待页面加载，处理可能的重定向
                 time.sleep(3)
                 
                 try:
@@ -598,37 +623,36 @@ class AutoLogin:
                     pass
                 
                 current_url = page.url
-                self.log(f"实际 URL: {current_url}", "INFO")
                 
-                # 更新区域检测
-                if 'claw.cloud' in current_url:
-                    self.detect_region(current_url)
+                # 检查是否被踢到登录页
+                if '/signin' in current_url:
+                    self.log(f"访问 {name} 被重定向到登录页！", "ERROR")
+                    return False
                 
                 self.log(f"已访问: {name}", "SUCCESS")
-                time.sleep(2)
                 
             except Exception as e:
                 self.log(f"访问 {name} 失败: {e}", "WARN")
         
-        self.shot(page, "完成")
+        self.shot(page, "保活完成")
+        return True
     
     def notify(self, ok, err=""):
         if not self.tg.ok:
             return
         
         region_info = f"\n<b>区域:</b> {self.detected_region}" if self.detected_region else ""
-        url_info = f"\n<b>URL:</b> {self.region_base_url}" if self.region_base_url else ""
         
         msg = f"""<b>🤖 ClawCloud 自动登录</b>
 
 <b>状态:</b> {"✅ 成功" if ok else "❌ 失败"}
-<b>用户:</b> {self.username}{region_info}{url_info}
+<b>用户:</b> {self.username}{region_info}
 <b>时间:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}"""
         
         if err:
             msg += f"\n<b>错误:</b> {err}"
         
-        msg += "\n\n<b>日志:</b>\n" + "\n".join(self.logs[-8:])
+        msg += "\n\n<b>日志:</b>\n" + "\n".join(self.logs[-10:])
         
         self.tg.send(msg)
         
@@ -647,7 +671,6 @@ class AutoLogin:
         self.log(f"用户名: {self.username}")
         self.log(f"Session: {'有' if self.gh_session else '无'}")
         self.log(f"密码: {'有' if self.password else '无'}")
-        self.log(f"登录入口: {LOGIN_ENTRY_URL}")
         
         if not self.username or not self.password:
             self.log("缺少凭据", "ERROR")
@@ -674,47 +697,47 @@ class AutoLogin:
                     except:
                         self.log("加载 Cookie 失败", "WARN")
                 
-                # 1. 访问 ClawCloud 登录入口
-                self.log("步骤1: 打开 ClawCloud 登录页", "STEP")
+                # 1. 访问登录页
+                self.log("步骤1: 打开登录页", "STEP")
                 page.goto(SIGNIN_URL, timeout=60000, wait_until='domcontentloaded')
-                
-                # 等待页面稳定，可能会有重定向
                 time.sleep(3)
+                
                 try:
                     page.wait_for_load_state('networkidle', timeout=30000)
                 except:
                     pass
                 
-                self.shot(page, "clawcloud")
-                
+                self.shot(page, "登录页")
                 current_url = page.url
-                self.log(f"当前 URL: {current_url}")
-                
-                # 检测区域
+                self.log(f"当前: {current_url}")
                 self.detect_region(current_url)
                 
                 # 检查是否已登录
-                if 'signin' not in current_url.lower() and 'claw.cloud' in current_url and 'github.com' not in current_url:
+                if self.is_logged_in(current_url):
                     self.log("已登录！", "SUCCESS")
-                    self.keepalive(page)
-                    new = self.get_session(context)
-                    if new:
-                        self.save_cookie(new)
-                    self.notify(True)
-                    print("\n✅ 成功！\n")
-                    return
+                    if self.verify_login(page):
+                        if self.keepalive(page):
+                            new = self.get_session(context)
+                            if new:
+                                self.save_cookie(new)
+                            self.notify(True)
+                            print("\n✅ 成功！\n")
+                            return
+                    else:
+                        self.log("登录状态验证失败", "WARN")
                 
-                # 2. 点击 GitHub
-                self.log("步骤2: 点击 GitHub", "STEP")
+                # 2. 点击 GitHub 登录
+                self.log("步骤2: 点击 GitHub 登录", "STEP")
                 if not self.click(page, [
                     'button:has-text("GitHub")',
                     'a:has-text("GitHub")',
                     '[data-provider="github"]',
                     'button:has-text("Continue with GitHub")',
-                    'a:has-text("Continue with GitHub")'
+                    'a:has-text("Continue with GitHub")',
+                    'button:has-text("Sign in with GitHub")',
                 ], "GitHub"):
-                    self.log("找不到按钮", "ERROR")
-                    self.shot(page, "找不到GitHub按钮")
+                    self.log("找不到 GitHub 按钮", "ERROR")
+                    self.shot(page, "找不到按钮")
                     self.notify(False, "找不到 GitHub 按钮")
                     sys.exit(1)
                 
@@ -723,49 +746,63 @@ class AutoLogin:
                     page.wait_for_load_state('networkidle', timeout=30000)
                 except:
                     pass
-                self.shot(page, "点击后")
                 
+                self.shot(page, "点击后")
                 url = page.url
                 self.log(f"当前: {url}")
                 
-                # 3. GitHub 登录
+                # 3. GitHub 认证
                 self.log("步骤3: GitHub 认证", "STEP")
                 
-                if 'github.com/login' in url or 'github.com/session' in url:
+                if 'github.com/login' in url and 'oauth' not in url:
                     if not self.login_github(page, context):
-                        self.shot(page, "登录失败")
+                        self.shot(page, "GitHub登录失败")
                         self.notify(False, "GitHub 登录失败")
                         sys.exit(1)
-                elif 'github.com/login/oauth/authorize' in url:
-                    self.log("Cookie 有效", "SUCCESS")
+                    
+                    # 登录后再次检查
+                    time.sleep(2)
+                    url = page.url
+                    self.log(f"GitHub 登录后: {url}")
+                    
+                if 'github.com/login/oauth/authorize' in url:
+                    self.log("处理 OAuth 授权", "SUCCESS")
                     self.oauth(page)
                 
-                # 4. 等待重定向
-                self.log("步骤4: 等待重定向", "STEP")
-                if not self.wait_redirect(page):
-                    self.shot(page, "重定向失败")
-                    self.notify(False, f"重定向失败，最终URL: {page.url}")
+                # 4. 等待登录完成（关键修复！）
+                self.log("步骤4: 等待登录完成", "STEP")
+                if not self.wait_for_login_complete(page, timeout=60):
+                    self.shot(page, "登录未完成")
+                    
+                    # 再尝试检查当前状态
+                    url = page.url
+                    self.log(f"当前状态: {url}")
+                    
+                    if '/signin' in url:
+                        self.notify(False, "登录后被重定向回登录页，可能被检测为机器人")
+                    elif '/callback' in url:
+                        self.notify(False, "OAuth callback 处理超时")
+                    else:
+                        self.notify(False, f"登录未完成: {url}")
                     sys.exit(1)
                 
-                self.shot(page, "重定向成功")
+                self.shot(page, "登录完成")
                 
-                # 5. 验证
-                self.log("步骤5: 验证", "STEP")
-                current_url = page.url
-                self.log(f"验证 URL: {current_url}")
-                
-                if 'claw.cloud' not in current_url or 'signin' in current_url.lower():
-                    self.notify(False, f"验证失败: {current_url}")
+                # 5. 验证登录状态
+                self.log("步骤5: 验证登录", "STEP")
+                if not self.verify_login(page):
+                    self.shot(page, "验证失败")
+                    self.notify(False, "登录验证失败")
                     sys.exit(1)
-                
-                if not self.detected_region:
-                    self.detect_region(current_url)
                 
                 # 6. 保活
-                self.keepalive(page)
+                self.log("步骤6: 保活", "STEP")
+                if not self.keepalive(page):
+                    self.notify(False, "保活失败，登录状态可能无效")
+                    sys.exit(1)
                 
                 # 7. 保存 Cookie
-                self.log("步骤6: 更新 Cookie", "STEP")
+                self.log("步骤7: 保存 Cookie", "STEP")
                 new = self.get_session(context)
                 if new:
                     self.save_cookie(new)
@@ -777,7 +814,6 @@ class AutoLogin:
                 print("✅ 成功！")
                 if self.detected_region:
                     print(f"📍 区域: {self.detected_region}")
-                    print(f"🌐 URL: {self.region_base_url}")
                 print("="*50 + "\n")
                 
             except Exception as e:
