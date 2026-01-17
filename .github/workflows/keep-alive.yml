@@ -25,12 +25,12 @@ jobs:
           playwright install chromium
           playwright install-deps
 
-      - name: 下载 Hysteria2
-        run: |
-          curl -Lo hysteria https://download.hysteria.network/app/latest/hysteria-linux-amd64
-          chmod +x hysteria
-          sudo mv hysteria /usr/local/bin/
-          hysteria version
+#      - name: 下载 Hysteria2
+#        run: |
+#          curl -Lo hysteria https://download.hysteria.network/app/latest/hysteria-linux-amd64
+#          chmod +x hysteria
+#          sudo mv hysteria /usr/local/bin/
+#          hysteria version
 
       - name: 运行自动登录
         env:
