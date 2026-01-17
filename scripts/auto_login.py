@@ -912,106 +912,170 @@ class AutoLogin:
             time.sleep(3)
             page.wait_for_load_state('networkidle', timeout=30000)
     
-    def wait_redirect(self, page, wait=60):
-        """等待重定向并检测区域"""
-        self.log("等待重定向...", "STEP")
-        for i in range(wait):
-            url = page.url
-            
-            # 检查是否已跳转到 claw.cloud
-            if 'claw.cloud' in url and 'signin' not in url.lower():
-                self.log("重定向成功！", "SUCCESS")
-                
-                # 检测并记录区域
-                self.detect_region(url)
-                
-                # 等待页面完全加载
-                try:
-                    page.wait_for_load_state('networkidle', timeout=15000)
-                    time.sleep(2)
-                except:
-                    pass
-                
-                # 验证是否真的登录了
-                is_logged_in, error = self.is_logged_in(page)
-                if is_logged_in:
-                    self.log("确认已登录！", "SUCCESS")
-                    return True
-                elif is_logged_in is False:
-                    self.log(f"重定向后未登录: {error}", "ERROR")
-                    self.shot(page, "重定向后_未登录")
-                    return False
-                else:
-                    # 无法确定，继续等待
-                    self.log(f"登录状态不明确: {error}", "WARN")
-            
-            if 'github.com/login/oauth/authorize' in url:
-                self.oauth(page)
-            
-            time.sleep(1)
-            if i % 10 == 0:
-                self.log(f"  等待... ({i}秒)")
-        
-        self.log("重定向超时", "ERROR")
-        return False
+def wait_redirect(self, page, wait=60):
+    """等待重定向并检测区域"""
+    self.log("等待重定向...", "STEP")
     
-    def keepalive(self, page):
-        """保活 - 使用检测到的区域 URL，并验证登录状态"""
-        self.log("保活...", "STEP")
+    # 增加错误检测的选择器
+    error_selectors = [
+        'text=REGION_NOT_AVAILABLE',
+        'text=Region not available',
+        '.error-message',
+        '[class*="error"]',
+        '[role="alert"]'
+    ]
+    
+    for i in range(wait):
+        url = page.url
         
-        # 使用检测到的区域 URL，如果没有则使用默认
-        base_url = self.get_base_url()
-        self.log(f"使用区域 URL: {base_url}", "INFO")
-        
-        pages_to_visit = [
-            (f"{base_url}/", "控制台"),
-            (f"{base_url}/apps", "应用"),
-        ]
-        
-        # 如果检测到了区域，可以额外访问一些区域特定页面
-        if self.detected_region:
-            self.log(f"当前区域: {self.detected_region}", "INFO")
-        
-        for url, name in pages_to_visit:
+        # 检查是否有错误提示
+        for error_sel in error_selectors:
             try:
-                self.log(f"访问: {name} ({url})", "INFO")
-                page.goto(url, timeout=30000)
-                page.wait_for_load_state('networkidle', timeout=15000)
+                error_el = page.locator(error_sel).first
+                if error_el.is_visible(timeout=1000):
+                    error_text = error_el.inner_text()
+                    self.log(f"检测到错误: {error_text}", "ERROR")
+                    
+                    # 如果是区域不可用，尝试访问主域名
+                    if 'REGION' in error_text.upper() or 'NOT_AVAILABLE' in error_text.upper():
+                        self.log("区域不可用，尝试访问主域名...", "WARN")
+                        try:
+                            # 访问主域名，让它自动分配可用区域
+                            page.goto("https://console.claw.cloud", timeout=30000)
+                            page.wait_for_load_state('networkidle', timeout=30000)
+                            time.sleep(3)
+                            
+                            # 重新检测区域
+                            new_url = page.url
+                            self.log(f"重定向到: {new_url}", "INFO")
+                            self.detect_region(new_url)
+                            
+                            # 检查是否还有错误
+                            has_error = False
+                            for err_sel in error_selectors:
+                                try:
+                                    if page.locator(err_sel).first.is_visible(timeout=2000):
+                                        has_error = True
+                                        break
+                                except:
+                                    pass
+                            
+                            if not has_error:
+                                self.log("成功访问主域名", "SUCCESS")
+                                # 继续检查登录状态
+                                break
+                            else:
+                                self.log("主域名也有错误", "ERROR")
+                                return False
+                        except Exception as e:
+                            self.log(f"访问主域名失败: {e}", "ERROR")
+                            return False
+            except:
+                pass
+        
+        # 检查是否已跳转到 claw.cloud（且不在登录页）
+        if 'claw.cloud' in url and 'signin' not in url.lower() and 'callback' not in url.lower():
+            self.log("重定向成功！", "SUCCESS")
+            
+            # 检测并记录区域
+            self.detect_region(url)
+            
+            # 等待页面完全加载（增加等待时间）
+            try:
+                # 先等 networkidle
+                page.wait_for_load_state('networkidle', timeout=20000)
+                time.sleep(3)
+                
+                # 再等 load
+                page.wait_for_load_state('load', timeout=10000)
                 time.sleep(2)
                 
-                # 检查是否被重定向回登录页
-                current_url = page.url.lower()
-                if 'signin' in current_url or 'login' in current_url:
-                    self.log(f"访问 {name} 时被重定向回登录页！", "ERROR")
-                    self.shot(page, f"{name}_重定向到登录页")
-                    return False
+                # 检查是否还在加载
+                loading_selectors = [
+                    '[class*="loading"]',
+                    '[class*="spinner"]',
+                    'text=Loading',
+                    '[role="progressbar"]'
+                ]
                 
-                # 验证登录状态
-                is_logged_in, error = self.is_logged_in(page)
-                if is_logged_in is False:
-                    self.log(f"访问 {name} 时未登录: {error}", "ERROR")
-                    self.shot(page, f"{name}_未登录")
-                    return False
-                
-                self.log(f"已访问: {name}", "SUCCESS")
-                
-                # 再次检测区域（以防中途跳转）
-                if 'claw.cloud' in page.url:
-                    self.detect_region(page.url)
-                
-                self.shot(page, f"{name}_页面")
+                for _ in range(10):  # 最多等10秒
+                    is_loading = False
+                    for loading_sel in loading_selectors:
+                        try:
+                            if page.locator(loading_sel).first.is_visible(timeout=1000):
+                                is_loading = True
+                                break
+                        except:
+                            pass
+                    
+                    if not is_loading:
+                        break
+                    
+                    self.log("  页面还在加载...", "INFO")
+                    time.sleep(1)
                 
             except Exception as e:
-                self.log(f"访问 {name} 失败: {e}", "WARN")
-                self.shot(page, f"{name}_异常")
+                self.log(f"等待加载异常: {e}", "WARN")
+            
+            # 再次检查是否有错误（加载完成后）
+            has_error = False
+            for error_sel in error_selectors:
+                try:
+                    error_el = page.locator(error_sel).first
+                    if error_el.is_visible(timeout=2000):
+                        error_text = error_el.inner_text()
+                        self.log(f"加载后仍有错误: {error_text}", "ERROR")
+                        has_error = True
+                        
+                        # 如果是区域错误，尝试主域名
+                        if 'REGION' in error_text.upper():
+                            self.log("尝试访问主域名...", "WARN")
+                            try:
+                                page.goto("https://console.claw.cloud", timeout=30000)
+                                page.wait_for_load_state('networkidle', timeout=30000)
+                                time.sleep(3)
+                                self.detect_region(page.url)
+                                has_error = False  # 重置错误标志
+                                break
+                            except:
+                                pass
+                        break
+                except:
+                    pass
+            
+            if has_error:
+                self.shot(page, "重定向后_有错误")
                 return False
+            
+            # 验证是否真的登录了
+            is_logged_in, error = self.is_logged_in(page)
+            if is_logged_in:
+                self.log("确认已登录！", "SUCCESS")
+                return True
+            elif is_logged_in is False:
+                self.log(f"重定向后未登录: {error}", "ERROR")
+                self.shot(page, "重定向后_未登录")
+                return False
+            else:
+                # 无法确定，继续等待
+                self.log(f"登录状态不明确: {error}", "WARN")
         
-        self.shot(page, "完成")
-        return True
+        # 处理 OAuth
+        if 'github.com/login/oauth/authorize' in url:
+            self.oauth(page)
+        
+        # 如果还在 callback 页面，等待跳转
+        if 'callback' in url:
+            if i % 5 == 0:
+                self.log(f"  等待 callback 跳转... ({i}秒)", "INFO")
+        
+        time.sleep(1)
+        if i % 10 == 0 and i > 0:
+            self.log(f"  等待... ({i}秒)")
+            self.shot(page, f"等待_{i}s")
     
-    def notify(self, ok, err=""):
-        if not self.tg.ok:
-            return
+    self.log("重定向超时", "ERROR")
+    return False
         
         region_info = f"\n<b>区域:</b> {self.detected_region or '默认'}" if self.detected_region else ""
         proxy_info = "\n<b>代理:</b> Hysteria2 ✅" if self.proxy.enabled else ""
