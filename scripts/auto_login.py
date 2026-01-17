@@ -22,8 +22,8 @@ from playwright.sync_api import sync_playwright
 
 # ==================== 配置 ====================
 # 固定登录入口，OAuth后会自动跳转到实际区域
-LOGIN_ENTRY_URL = "console.run.claw.cloud/login"
-SIGNIN_URL = f"{LOGIN_ENTRY_URL}/signin"
+LOGIN_ENTRY_URL = "https://console.run.claw.cloud"
+SIGNIN_URL = f"{LOGIN_ENTRY_URL}/login"
 DEVICE_VERIFY_WAIT = 30  # Mobile验证 默认等 30 秒
 TWO_FACTOR_WAIT = int(os.environ.get("TWO_FACTOR_WAIT", "120"))  # 2FA验证 默认等 120 秒
 
