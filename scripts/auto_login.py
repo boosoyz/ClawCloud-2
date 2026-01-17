@@ -429,9 +429,7 @@ class SecretUpdater:
         except Exception as e:
             print(f"更新 Secret 失败: {e}")
             return False
-## 第二段：AutoLogin 类（前半部分）
 
-```python
 class AutoLogin:
     """自动登录"""
   
